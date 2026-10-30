@@ -3,15 +3,23 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+env:
+  ARQUIVO: GlucoCris_v1_5.aaf
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Extrair projeto
+        id: p
         run: |
-          unzip -q GlucoCris_v1.aaf.zip
-          rm -f agon_source/local.properties
+          mkdir proj
+          unzip -q "$ARQUIVO" -d proj
+          DIR=$(dirname "$(find proj -name 'settings.gradle*' | head -1)")
+          echo "dir=$DIR" >> $GITHUB_OUTPUT
+          rm -f "$DIR/local.properties"
+          V=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null)
+          echo "gv=${V:-8.11.1}" >> $GITHUB_OUTPUT
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -22,11 +30,11 @@ jobs:
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.11.1
+          gradle-version: ${{ steps.p.outputs.gv }}
       - name: Compilar
-        working-directory: agon_source
+        working-directory: ${{ steps.p.outputs.dir }}
         run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: GlucoCris-apk
-          path: agon_source/app/build/outputs/apk/**/*.apk
+          name: apk-${{ env.ARQUIVO }}
+          path: proj/**/build/outputs/apk/**/*.apk

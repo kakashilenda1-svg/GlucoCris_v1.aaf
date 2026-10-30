@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
 env:
-  ARQUIVO: GlucoCris_v1_5_fix.aaf
+  ARQUIVO: GlucoCris_v1_5_fix2.aaf
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -36,5 +36,5 @@ jobs:
         run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: apk-GlucoCris-v1-5-fix
+          name: apk-GlucoCris-v1-5-fix2
           path: proj/**/build/outputs/apk/**/*.apk

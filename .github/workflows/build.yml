@@ -1,29 +1,29 @@
-Nome: Criar APK
-sobre:
-  despacho de fluxo de trabalho:
-  empurrar:
-    ramos: [principal]
-empregos:
-  construir:
-    executa em: ubuntu-latest
-    passos:
-      - usa: ações/checkout@v4
-      - nome: Extrair projeto
-        executar: |
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extrair projeto
+        run: |
           unzip -q GlucoCris_v1.aaf
           rm -f agon_source/local.properties
-      - usa: actions/setup-java@v4
-        com:
-          Distribuição: temurin
-          versão do java: 17
-      - usa: android-actions/setup-android@v3
-      - usa: gradle/actions/setup-gradle@v4
-        com:
-          versão do Gradle: 8.11.1
-      - nome: Compilador
-        diretório de trabalho: agon_source
-        executar: gradle assembleDebug --no-daemon
-      - usa: actions/upload-artifact@v4
-        com:
-          Nome: GlucoCris-apk
-          Caminho: agon_source/app/build/outputs/apk/**/*.apk
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+      - name: Compilar
+        working-directory: agon_source
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GlucoCris-apk
+          path: agon_source/app/build/outputs/apk/**/*.apk

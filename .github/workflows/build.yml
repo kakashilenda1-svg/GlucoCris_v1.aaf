@@ -3,21 +3,25 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-env:
-  ARQUIVO: GlucoCris_v1_5_fix2.aaf
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Extrair projeto
         id: p
         run: |
+          ARQUIVO=$(for f in *.aaf; do echo "$(git log -1 --format=%ct -- "$f") $f"; done | sort -n | tail -1 | cut -d' ' -f2-)
+          echo "Usando: $ARQUIVO"
           mkdir proj
           unzip -q "$ARQUIVO" -d proj
           DIR=$(dirname "$(find proj -name 'settings.gradle*' | head -1)")
           echo "dir=$DIR" >> $GITHUB_OUTPUT
           rm -f "$DIR/local.properties"
+          echo "--- Versao no projeto ---"
+          grep -rhE "versionName|versionCode" "$DIR"/app/build.gradle* || true
           V=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null)
           echo "gv=${V:-8.11.1}" >> $GITHUB_OUTPUT
       - uses: actions/setup-java@v4
@@ -36,5 +40,5 @@ jobs:
         run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: apk-GlucoCris-v1-5-fix2
+          name: apk-GlucoCris-build-${{ github.run_number }}
           path: proj/**/build/outputs/apk/**/*.apk

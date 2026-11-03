@@ -3,6 +3,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -10,35 +14,51 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Extrair projeto
+
+      - name: Extract project
         id: p
         run: |
           ARQUIVO=$(for f in *.aaf; do echo "$(git log -1 --format=%ct -- "$f") $f"; done | sort -n | tail -1 | cut -d' ' -f2-)
-          echo "Usando: $ARQUIVO"
+          echo "Using: $ARQUIVO"
           mkdir proj
           unzip -q "$ARQUIVO" -d proj
           DIR=$(dirname "$(find proj -name 'settings.gradle*' | head -1)")
           echo "dir=$DIR" >> $GITHUB_OUTPUT
           rm -f "$DIR/local.properties"
-          echo "--- Versao no projeto ---"
+          echo "--- Version in project ---"
           grep -rhE "versionName|versionCode" "$DIR"/app/build.gradle* || true
           V=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null)
           echo "gv=${V:-8.11.1}" >> $GITHUB_OUTPUT
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      - name: Preparar Android SDK
+
+      - name: Prepare Android SDK
         run: |
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ steps.p.outputs.gv }}
-      - name: Compilar
+
+      - name: Build universal APK
         working-directory: ${{ steps.p.outputs.dir }}
         run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
+
+      - name: Prepare APK
+        run: |
+          APK=$(find proj -path '*build/outputs/apk/debug/*.apk' | head -1)
+          echo "APK: $APK"
+          cp "$APK" GlucoCris-universal.apk
+          ls -lh GlucoCris-universal.apk
+
+      - name: Publish APK (direct download, no ZIP)
+        uses: softprops/action-gh-release@v2
         with:
-          name: apk-GlucoCris-build-${{ github.run_number }}
-          path: proj/**/build/outputs/apk/**/*.apk
+          tag_name: apk-build-${{ github.run_number }}
+          name: GlucoCris build ${{ github.run_number }}
+          body: Universal APK (works on all devices). Download GlucoCris-universal.apk and install.
+          files: GlucoCris-universal.apk

@@ -12,17 +12,54 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Find project
+      - name: Extract project
         id: p
         run: |
           set -e
-          SETTINGS=$(find . -name 'settings.gradle*' | head -1)
-          if [ -z "$SETTINGS" ]; then
-            echo "settings.gradle* nao encontrado"
-            find . -maxdepth 3 -type f | head -50
+
+          # Escolhe o .aaf/.zip com maior versionCode (lendo dentro do arquivo)
+          ARQUIVO=""
+          MAX_VC=-1
+
+          shopt -s nullglob
+          for f in *.aaf *.zip *.aaf.zip; do
+            [ -f "$f" ] || continue
+            VC=$(unzip -p "$f" "app/build.gradle.kts" 2>/dev/null | \
+                 grep -oE 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' | \
+                 head -1 | grep -oE '[0-9]+' || echo 0)
+            echo "-> $f  (versionCode=$VC)"
+            if [ "$VC" -gt "$MAX_VC" ]; then
+              MAX_VC=$VC
+              ARQUIVO="$f"
+            fi
+          done
+
+          # Se nenhum tiver versionCode legível, pega o nome mais "novo" (sort -V)
+          if [ -z "$ARQUIVO" ]; then
+            ARQUIVO=$(ls -1 *.aaf *.zip 2>/dev/null | sort -V | tail -1 || true)
+          fi
+
+          if [ -z "$ARQUIVO" ] || [ ! -f "$ARQUIVO" ]; then
+            echo "Nenhum .aaf/.zip encontrado na raiz do repositorio"
+            ls -la
             exit 1
           fi
+
+          echo "Usando: $ARQUIVO (versionCode=$MAX_VC)"
+          rm -rf proj
+          mkdir -p proj
+          unzip -q "$ARQUIVO" -d proj
+
+          SETTINGS=$(find proj -name 'settings.gradle*' | head -1)
+          if [ -z "$SETTINGS" ]; then
+            echo "settings.gradle* nao encontrado dentro de $ARQUIVO"
+            find proj -maxdepth 3 -type f | head -40
+            exit 1
+          fi
+
           DIR=$(dirname "$SETTINGS")
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
           echo "Project dir: $DIR"
@@ -64,10 +101,10 @@ jobs:
 
       - name: Prepare APK
         run: |
-          APK=$(find . -path '*/build/outputs/apk/debug/*.apk' | head -1)
+          APK=$(find proj -path '*/build/outputs/apk/debug/*.apk' | head -1)
           if [ -z "$APK" ]; then
             echo "APK nao encontrado"
-            find . -path '*/build/outputs/*' | head -40
+            find proj -path '*/build/outputs/*' | head -40
             exit 1
           fi
           echo "APK: $APK"
@@ -78,8 +115,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-build-${{ github.run_number }}
-          name: GlucoCris v1.26.0 build ${{ github.run_number }}
+          name: GlucoCris build ${{ github.run_number }}
           body: |
-            GlucoCris v1.26.0 (Cris Scanner)
+            APK gerado a partir do .aaf/.zip com maior versionCode do repositorio.
             Baixe GlucoCris-universal.apk e instale no celular.
           files: GlucoCris-universal.apk

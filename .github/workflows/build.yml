@@ -16,17 +16,31 @@ jobs:
       - name: Find project
         id: p
         run: |
-          DIR=\( (dirname " \)(find . -name 'settings.gradle*' | head -1)")
-          echo "dir=$DIR" >> $GITHUB_OUTPUT
+          set -e
+          SETTINGS=$(find . -name 'settings.gradle*' | head -1)
+          if [ -z "$SETTINGS" ]; then
+            echo "settings.gradle* nao encontrado"
+            find . -maxdepth 3 -type f | head -50
+            exit 1
+          fi
+          DIR=$(dirname "$SETTINGS")
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
           echo "Project dir: $DIR"
-          
+
           rm -f "$DIR/local.properties"
-          
+
           echo "--- Version no projeto ---"
           grep -rhE "versionName|versionCode" "$DIR"/app/build.gradle* || true
-          
-          V=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null)
-          echo "gv=${V:-8.11.1}" >> $GITHUB_OUTPUT
+
+          GV=8.11.1
+          if [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
+            DETECTED=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" | head -1)
+            if [ -n "$DETECTED" ]; then
+              GV="$DETECTED"
+            fi
+          fi
+          echo "gv=$GV" >> "$GITHUB_OUTPUT"
+          echo "Gradle: $GV"
 
       - uses: actions/setup-java@v4
         with:
@@ -45,12 +59,17 @@ jobs:
       - name: Build universal APK
         working-directory: ${{ steps.p.outputs.dir }}
         run: |
-          chmod +x ./gradlew 2>/dev/null || true
+          chmod +x ./gradlew || true
           ./gradlew assembleDebug --no-daemon
 
       - name: Prepare APK
         run: |
           APK=$(find . -path '*/build/outputs/apk/debug/*.apk' | head -1)
+          if [ -z "$APK" ]; then
+            echo "APK nao encontrado"
+            find . -path '*/build/outputs/*' | head -40
+            exit 1
+          fi
           echo "APK: $APK"
           cp "$APK" GlucoCris-universal.apk
           ls -lh GlucoCris-universal.apk
@@ -61,12 +80,6 @@ jobs:
           tag_name: apk-build-${{ github.run_number }}
           name: GlucoCris v1.26.0 build ${{ github.run_number }}
           body: |
-            GlucoCris **v1.26.0** (Cris Scanner ❤️)
-            - Leitura de rótulo (Gemini + OCR offline)
-            - Histórico de análises
-            - Comparação de produtos
-            - Salvar no catálogo + Bolus
-            - Contexto automático na Cris IA
-            
-            Baixe **GlucoCris-universal.apk** e instale no celular.
+            GlucoCris v1.26.0 (Cris Scanner)
+            Baixe GlucoCris-universal.apk e instale no celular.
           files: GlucoCris-universal.apk

@@ -20,13 +20,17 @@ jobs:
         run: |
           set -e
 
-          # Escolhe o .aaf/.zip com maior versionCode (lendo dentro do arquivo)
           ARQUIVO=""
           MAX_VC=-1
 
           shopt -s nullglob
           for f in *.aaf *.zip *.aaf.zip; do
             [ -f "$f" ] || continue
+            # ignora zips que nao parecem projeto android
+            if ! unzip -l "$f" 2>/dev/null | grep -q 'settings.gradle'; then
+              echo "ignorando (sem settings.gradle): $f"
+              continue
+            fi
             VC=$(unzip -p "$f" "app/build.gradle.kts" 2>/dev/null | \
                  grep -oE 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' | \
                  head -1 | grep -oE '[0-9]+' || echo 0)
@@ -37,13 +41,8 @@ jobs:
             fi
           done
 
-          # Se nenhum tiver versionCode legível, pega o nome mais "novo" (sort -V)
           if [ -z "$ARQUIVO" ]; then
-            ARQUIVO=$(ls -1 *.aaf *.zip 2>/dev/null | sort -V | tail -1 || true)
-          fi
-
-          if [ -z "$ARQUIVO" ] || [ ! -f "$ARQUIVO" ]; then
-            echo "Nenhum .aaf/.zip encontrado na raiz do repositorio"
+            echo "Nenhum .aaf/.zip com projeto Android encontrado"
             ls -la
             exit 1
           fi
@@ -56,7 +55,7 @@ jobs:
           SETTINGS=$(find proj -name 'settings.gradle*' | head -1)
           if [ -z "$SETTINGS" ]; then
             echo "settings.gradle* nao encontrado dentro de $ARQUIVO"
-            find proj -maxdepth 3 -type f | head -40
+            find proj -maxdepth 4 -type f | head -50
             exit 1
           fi
 
@@ -68,6 +67,9 @@ jobs:
 
           echo "--- Version no projeto ---"
           grep -rhE "versionName|versionCode" "$DIR"/app/build.gradle* || true
+
+          # Lista wrapper (diagnostico)
+          ls -la "$DIR/gradle/wrapper/" 2>/dev/null || echo "sem pasta gradle/wrapper"
 
           GV=8.11.1
           if [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
@@ -96,15 +98,16 @@ jobs:
       - name: Build universal APK
         working-directory: ${{ steps.p.outputs.dir }}
         run: |
-          chmod +x ./gradlew || true
-          ./gradlew assembleDebug --no-daemon
+          # NAO usa ./gradlew (muitos .aaf nao tem gradle-wrapper.jar)
+          # Usa o Gradle instalado pelo setup-gradle
+          gradle assembleDebug --no-daemon --stacktrace
 
       - name: Prepare APK
         run: |
           APK=$(find proj -path '*/build/outputs/apk/debug/*.apk' | head -1)
           if [ -z "$APK" ]; then
             echo "APK nao encontrado"
-            find proj -path '*/build/outputs/*' | head -40
+            find proj -path '*/build/outputs/*' | head -50
             exit 1
           fi
           echo "APK: $APK"
@@ -117,6 +120,6 @@ jobs:
           tag_name: apk-build-${{ github.run_number }}
           name: GlucoCris build ${{ github.run_number }}
           body: |
-            APK gerado a partir do .aaf/.zip com maior versionCode do repositorio.
+            APK gerado a partir do .aaf com maior versionCode.
             Baixe GlucoCris-universal.apk e instale no celular.
           files: GlucoCris-universal.apk

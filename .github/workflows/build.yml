@@ -12,21 +12,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Extract project
+      - name: Find project
         id: p
         run: |
-          ARQUIVO=$(for f in *.aaf; do echo "$(git log -1 --format=%ct -- "$f") $f"; done | sort -n | tail -1 | cut -d' ' -f2-)
-          echo "Using: $ARQUIVO"
-          mkdir proj
-          unzip -q "$ARQUIVO" -d proj
-          DIR=$(dirname "$(find proj -name 'settings.gradle*' | head -1)")
+          DIR=\( (dirname " \)(find . -name 'settings.gradle*' | head -1)")
           echo "dir=$DIR" >> $GITHUB_OUTPUT
+          echo "Project dir: $DIR"
+          
+          # Remove local.properties se existir
           rm -f "$DIR/local.properties"
-          echo "--- Version in project ---"
+          
+          echo "--- Version no projeto ---"
           grep -rhE "versionName|versionCode" "$DIR"/app/build.gradle* || true
+          
+          # Detecta versão do Gradle
           V=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null)
           echo "gv=${V:-8.11.1}" >> $GITHUB_OUTPUT
 
@@ -46,19 +46,19 @@ jobs:
 
       - name: Build universal APK
         working-directory: ${{ steps.p.outputs.dir }}
-        run: gradle assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon
 
       - name: Prepare APK
         run: |
-          APK=$(find proj -path '*build/outputs/apk/debug/*.apk' | head -1)
+          APK=$(find . -path '*/build/outputs/apk/debug/*.apk' | head -1)
           echo "APK: $APK"
           cp "$APK" GlucoCris-universal.apk
           ls -lh GlucoCris-universal.apk
 
-      - name: Publish APK (direct download, no ZIP)
+      - name: Publish APK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-build-${{ github.run_number }}
           name: GlucoCris build ${{ github.run_number }}
-          body: Universal APK (works on all devices). Download GlucoCris-universal.apk and install.
+          body: Universal APK (funciona em todos os dispositivos). Baixe o GlucoCris-universal.apk e instale.
           files: GlucoCris-universal.apk

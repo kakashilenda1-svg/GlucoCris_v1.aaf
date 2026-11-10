@@ -100,7 +100,21 @@ jobs:
         run: |
           # NAO usa ./gradlew (muitos .aaf nao tem gradle-wrapper.jar)
           # Usa o Gradle instalado pelo setup-gradle
-          gradle assembleDebug --no-daemon --stacktrace
+          set +e
+          gradle assembleDebug --no-daemon --stacktrace --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            {
+              echo "## Erro do build (resumo)"
+              echo '```'
+              grep -nE "^e: |^FAILURE:|What went wrong|Execution failed|Duplicate class|requires libraries|minCompileSdk|Could not resolve|Could not find|AAPT:|error:|Manifest merger|Caused by:" "$GITHUB_WORKSPACE/build.log" | grep -v "at org.gradle" | head -60
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            MSG=$(grep -nE "^e: |What went wrong|Execution failed|Duplicate class|requires libraries|Could not resolve|Could not find|AAPT:|Manifest merger" "$GITHUB_WORKSPACE/build.log" | grep -v "at org.gradle" | head -12 | tr '\n' '|' | sed 's/%/%25/g')
+            echo "::error title=Build falhou::${MSG}"
+            exit "$STATUS"
+          fi
 
       - name: Prepare APK
         run: |

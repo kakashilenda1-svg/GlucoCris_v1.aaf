@@ -20,13 +20,11 @@ jobs:
           echo "dir=$DIR" >> $GITHUB_OUTPUT
           echo "Project dir: $DIR"
           
-          # Remove local.properties se existir
           rm -f "$DIR/local.properties"
           
           echo "--- Version no projeto ---"
           grep -rhE "versionName|versionCode" "$DIR"/app/build.gradle* || true
           
-          # Detecta versão do Gradle
           V=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null)
           echo "gv=${V:-8.11.1}" >> $GITHUB_OUTPUT
 
@@ -46,7 +44,9 @@ jobs:
 
       - name: Build universal APK
         working-directory: ${{ steps.p.outputs.dir }}
-        run: ./gradlew assembleDebug --no-daemon
+        run: |
+          chmod +x ./gradlew 2>/dev/null || true
+          ./gradlew assembleDebug --no-daemon
 
       - name: Prepare APK
         run: |
@@ -59,6 +59,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-build-${{ github.run_number }}
-          name: GlucoCris build ${{ github.run_number }}
-          body: Universal APK (funciona em todos os dispositivos). Baixe o GlucoCris-universal.apk e instale.
+          name: GlucoCris v1.26.0 build ${{ github.run_number }}
+          body: |
+            GlucoCris **v1.26.0** (Cris Scanner ❤️)
+            - Leitura de rótulo (Gemini + OCR offline)
+            - Histórico de análises
+            - Comparação de produtos
+            - Salvar no catálogo + Bolus
+            - Contexto automático na Cris IA
+            
+            Baixe **GlucoCris-universal.apk** e instale no celular.
           files: GlucoCris-universal.apk

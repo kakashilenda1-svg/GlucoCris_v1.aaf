@@ -1,11 +1,11 @@
+
 name: Build APK
 
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch: # também dá para rodar manualmente: aba Actions > Build APK > Run workflow
+    branches: [main, master]
+  workflow_dispatch:
 
-# Se você enviar vários arquivos em sequência, só o build mais recente continua rodando.
 concurrency:
   group: build-apk-${{ github.ref }}
   cancel-in-progress: true
@@ -14,75 +14,166 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+
     permissions:
-      contents: write # necessário só para publicar o APK na aba Releases
+      contents: write
 
     steps:
-      - uses: actions/checkout@v7
+      # 1. Baixar o código do repositório
+      - name: Checkout
+        uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v6
+      # 2. Localizar automaticamente o projeto Android
+      - name: Localizar projeto Gradle
+        shell: bash
+        run: |
+          echo "Procurando settings.gradle..."
+
+          SETTINGS=$(find . -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -not -path "./.git/*" -print -quit)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::Não foi encontrado settings.gradle ou settings.gradle.kts no repositório."
+            echo "Verifique se os arquivos do projeto Android foram enviados ao GitHub."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "Projeto encontrado em: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "=== ARQUIVOS DO PROJETO ==="
+          ls -la "$PROJECT_DIR"
+
+      # 3. Configurar Java 17
+      - name: Configurar Java
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
+      # 4. Preparar Android SDK
       - name: Preparar Android SDK
+        shell: bash
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-      # O repositório não traz gradle-wrapper.jar: usamos o mesmo Gradle do wrapper (8.11.1).
-      # cache-provider: basic = cache gratuito (open source), vale para repositório público e privado.
-      - uses: gradle/actions/setup-gradle@v6
+          if [ ! -x "$SDKMANAGER" ]; then
+            if command -v sdkmanager >/dev/null 2>&1; then
+              SDKMANAGER="$(command -v sdkmanager)"
+            else
+              echo "::error::Android SDK Manager não encontrado."
+              exit 1
+            fi
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+      # 5. Configurar Gradle sem cache
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.11.1'
-          cache-provider: basic
+          cache-disabled: true
 
+      # 6. Compilar aplicativo
       - name: Build universal APK
         id: build
+        shell: bash
         env:
           TAVILY_PROXY_URL: ${{ secrets.TAVILY_PROXY_URL }}
           TAVILY_APP_TOKEN: ${{ secrets.TAVILY_APP_TOKEN }}
         run: |
           set -o pipefail
-          gradle :app:assembleDebug --stacktrace --console=plain "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" 2>&1 | tee build.log
 
+          gradle -p "$PROJECT_DIR" \
+            :app:assembleDebug \
+            --stacktrace \
+            --console=plain \
+            "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" \
+            2>&1 | tee build.log
+
+      # 7. Mostrar resumo se houver erro
       - name: Resumo do erro
         if: failure() && steps.build.outcome == 'failure'
+        shell: bash
         run: |
-          grep -E '^e: ' build.log | sed -E 's#^e: file://.*/com/agon/app/##' | sed 's/%/%25/g' | head -n 10 | while IFS= read -r linha; do echo "::error title=Kotlin::$linha"; done
           {
-            echo "## Erro do build (resumo)"
+            echo "## Erro do build"
             echo '```'
-            grep -E '^e: ' build.log | sed -E 's#^e: file://.*/com/agon/app/##' | head -n 30
-            echo '--- outros ---'
-            grep -E -A8 '^\* What went wrong:' build.log | head -n 25
+
+            if [ -f build.log ]; then
+              grep -E '^e: |^\* What went wrong:|^Execution failed' \
+                build.log | head -n 40 || true
+
+              echo "--- Detalhes ---"
+              grep -A12 '^\* What went wrong:' \
+                build.log | head -n 20 || true
+            fi
+
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 8. Preparar APK
       - name: Prepare APK
+        shell: bash
         run: |
-          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
+          VERSION=$(sed -n \
+            's/.*versionName = "\([^"]*\)".*/\1/p' \
+            "$PROJECT_DIR/app/build.gradle.kts" | head -n 1)
+
           VERSION=${VERSION:-dev}
-          mkdir -p dist
-          cp "$(ls app/build/outputs/apk/debug/*.apk | head -n 1)" "dist/GlucoCris-v${VERSION}.apk"
+
+          APK_PATH=$(find \
+            "$PROJECT_DIR/app/build/outputs/apk/debug" \
+            -type f -name "*.apk" -print -quit)
+
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::APK não encontrado após a compilação."
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+
+          cp "$APK_PATH" \
+            "$GITHUB_WORKSPACE/dist/GlucoCris-v${VERSION}.apk"
+
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Publish APK
+          echo "APK preparado: GlucoCris-v${VERSION}.apk"
+
+      # 9. Disponibilizar APK para download
+      - name: Publish APK Artifact
         uses: actions/upload-artifact@v7
         with:
           name: GlucoCris-v${{ env.VERSION }}-apk
           path: dist/*.apk
           if-no-files-found: error
+          retention-days: 30
 
-      # Extra: deixa o .apk pronto para baixar direto na aba Releases (se falhar, não derruba o build).
+      # 10. Publicar APK na aba Releases
       - name: Publicar APK em Releases
         continue-on-error: true
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release delete apk-mais-recente --cleanup-tag --yes || true
-          gh release create apk-mais-recente "dist/GlucoCris-v${VERSION}.apk" \
-            --title "Gluco Cris v${VERSION} (build ${{ github.run_number }})" \
-            --notes "APK gerado automaticamente pelo GitHub Actions (commit ${GITHUB_SHA::7})." \
-            --target "$GITHUB_SHA"
+          TAG="apk-mais-recente"
+          APK="dist/GlucoCris-v${VERSION}.apk"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --title "Gluco Cris v${VERSION}" \
+              --notes "APK gerado automaticamente pelo GitHub Actions. Commit: ${GITHUB_SHA::7}" \
+              --target "$GITHUB_SHA"
+          fi
+          

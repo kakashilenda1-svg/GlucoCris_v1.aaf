@@ -1,143 +1,288 @@
-name: Build APK
-on:
-  workflow_dispatch:
-  push:
-    branches: [main]
+package com.agon.app.reminders
 
-permissions:
-  contents: write
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProvider
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import android.widget.RemoteViews
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
+import androidx.core.content.ContextCompat
+import com.agon.app.MainActivity
+import com.agon.app.R
+import com.agon.app.cloud.CloudSyncScheduler
+import com.agon.app.data.GlucoStorage
+import com.agon.app.data.GlucoViewModel
+import com.agon.app.data.GlucoseEntry
+import com.agon.app.data.formatTime
+import com.agon.app.data.parseDecimal
+import com.agon.app.data.toMgDl
+import com.agon.app.data.uid
+import com.agon.app.ui.components.PrimaryButton
+import com.agon.app.ui.theme.AgonAppTheme
+import com.agon.app.ui.theme.glucoColors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+/**
+ * Registro rápido de glicemia sem abrir o app: pelo widget da tela inicial (abre só uma janelinha) e pelo atalho
+ * na barra de notificações (digita o valor ali mesmo). Se o app estiver na memória, o registro passa pelo fluxo normal
+ * dele; se estiver fechado, grava direto e pede um envio ao backup.
+ */
+object QuickGlucose {
+    private val lock = Mutex()
 
-      - name: Extract project
-        id: p
-        run: |
-          set -e
+    fun validate(value: Double, unit: String): String? =
+        if (unit == "mmol/L") {
+            if (value < 1.1 || value > 33.3) "Valor fora do esperado (1,1 a 33,3 mmol/L)." else null
+        } else {
+            if (value < 20.0 || value > 600.0) "Valor fora do esperado (20 a 600 mg/dL)." else null
+        }
 
-          ARQUIVO=""
-          MAX_VC=-1
+    suspend fun unitNow(ctx: Context): String {
+        val live = GlucoViewModel.liveInstance()
+        if (live != null) return live.data.value.settings.preferredUnit
+        return try { GlucoStorage.read(ctx.applicationContext)?.settings?.preferredUnit ?: "mg/dL" } catch (_: Exception) { "mg/dL" }
+    }
 
-          shopt -s nullglob
-          for f in *.aaf *.zip *.aaf.zip; do
-            [ -f "$f" ] || continue
-            # ignora zips que nao parecem projeto android
-            if ! unzip -l "$f" 2>/dev/null | grep -q 'settings.gradle'; then
-              echo "ignorando (sem settings.gradle): $f"
-              continue
-            fi
-            VC=$(unzip -p "$f" "app/build.gradle.kts" 2>/dev/null | \
-                 grep -oE 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' | \
-                 head -1 | grep -oE '[0-9]+' || echo 0)
-            echo "-> $f  (versionCode=$VC)"
-            if [ "$VC" -gt "$MAX_VC" ]; then
-              MAX_VC=$VC
-              ARQUIVO="$f"
-            fi
-          done
+    /** Devolve (salvou?, mensagem para a pessoa). */
+    suspend fun save(ctx: Context, raw: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val app = ctx.applicationContext
+        val v = parseDecimal(raw) ?: return@withContext false to "Digite só o número da glicemia."
+        lock.withLock {
+            val live = GlucoViewModel.liveInstance()
+            if (live != null) {
+                val unit = live.data.value.settings.preferredUnit
+                validate(v, unit)?.let { return@withLock false to it }
+                val ok = withContext(Dispatchers.Main) { live.saveQuickGlucose(v, unit) }
+                return@withLock if (ok) true to "Glicemia registrada: $raw $unit." else false to "Saia do modo simulação do tour para registrar."
+            }
+            val data = try { GlucoStorage.read(app) } catch (_: Exception) { null }
+                ?: return@withLock false to "Abra o Gluco Cris uma vez antes de usar o atalho."
+            val unit = data.settings.preferredUnit
+            validate(v, unit)?.let { return@withLock false to it }
+            val now = System.currentTimeMillis()
+            val entry = GlucoseEntry(uid(), v, unit, now, "outro", "Registro rápido", now, now)
+            GlucoStorage.write(app, data.copy(glucose = listOf(entry) + data.glucose))
+            val mg = toMgDl(v, unit)
+            if (mg > data.settings.targetHigh) WaterAlert.notifyHighGlucose(app, mg)
+            Caregiver.onNewGlucose(app, mg, now, data.settings.displayName)
+            CloudSyncScheduler.kickOnce(app)
+            true to "Glicemia registrada: $raw $unit."
+        }
+    }
+}
 
-          if [ -z "$ARQUIVO" ]; then
-            echo "Nenhum .aaf/.zip com projeto Android encontrado"
-            ls -la
-            exit 1
-          fi
+/** Atalho fixo na barra de notificações: toque em "Registrar glicemia", digite o valor e envie. */
+object QuickGlucoseNotifier {
+    private const val PREFS = "gluco_quick_v1"
+    private const val KEY_ON = "notif_on"
+    const val CHANNEL = "gluco_atalho_v1"
+    const val NOTIF_ID = 7702
+    const val KEY_REPLY = "glucose_value"
 
-          echo "Usando: $ARQUIVO (versionCode=$MAX_VC)"
-          rm -rf proj
-          mkdir -p proj
-          unzip -q "$ARQUIVO" -d proj
+    fun isOn(ctx: Context): Boolean =
+        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ON, false)
 
-          SETTINGS=$(find proj -name 'settings.gradle*' | head -1)
-          if [ -z "$SETTINGS" ]; then
-            echo "settings.gradle* nao encontrado dentro de $ARQUIVO"
-            find proj -maxdepth 4 -type f | head -50
-            exit 1
-          fi
+    fun setOn(ctx: Context, on: Boolean) {
+        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ON, on).apply()
+        refresh(ctx)
+    }
 
-          DIR=$(dirname "$SETTINGS")
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "Project dir: $DIR"
+    fun refresh(ctx: Context) {
+        val app = ctx.applicationContext
+        if (isOn(app)) show(app) else try { NotificationManagerCompat.from(app).cancel(NOTIF_ID) } catch (_: Exception) {}
+    }
 
-          rm -f "$DIR/local.properties"
+    fun show(ctx: Context, resultText: String? = null) {
+        val app = ctx.applicationContext
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(app, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val ch = NotificationChannel(CHANNEL, "Atalho de glicemia", NotificationManager.IMPORTANCE_LOW)
+                ch.description = "Registrar a glicemia direto da barra de notificações, sem abrir o app."
+                ch.setSound(null, null)
+                nm.createNotificationChannel(ch)
+            }
+            val remote = RemoteInput.Builder(KEY_REPLY).setLabel("Glicemia (número)").build()
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
+            val replyPi = PendingIntent.getBroadcast(app, NOTIF_ID, Intent(app, QuickGlucoseReceiver::class.java).setPackage(app.packageName), flags)
+            val action = NotificationCompat.Action.Builder(R.drawable.ic_stat_drop, "Registrar glicemia", replyPi)
+                .addRemoteInput(remote)
+                .setAllowGeneratedReplies(false)
+                .build()
+            val open = Intent(app, MainActivity::class.java).apply { this.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP }
+            val b = NotificationCompat.Builder(app, CHANNEL)
+                .setSmallIcon(R.drawable.ic_stat_drop)
+                .setContentTitle("Gluco Cris ❤️")
+                .setContentText(resultText ?: "Registrar glicemia sem abrir o app")
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setColor(0xFF6D28D9.toInt())
+                .setContentIntent(PendingIntent.getActivity(app, NOTIF_ID, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+                .addAction(action)
+            NotificationManagerCompat.from(app).notify(NOTIF_ID, b.build())
+        } catch (_: SecurityException) {
+        } catch (_: Exception) {
+        }
+    }
+}
 
-          echo "--- Version no projeto ---"
-          grep -rhE "versionName|versionCode" "$DIR"/app/build.gradle* || true
+class QuickGlucoseReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(QuickGlucoseNotifier.KEY_REPLY)?.toString().orEmpty()
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val (ok, msg) = QuickGlucose.save(context, text)
+                // Sem o valor na notificação (ela pode aparecer na tela bloqueada)
+                QuickGlucoseNotifier.show(context, if (ok) "Glicemia registrada às ${formatTime(System.currentTimeMillis())}" else msg)
+            } catch (_: Exception) {
+                QuickGlucoseNotifier.show(context)
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+}
 
-          # Lista wrapper (diagnostico)
-          ls -la "$DIR/gradle/wrapper/" 2>/dev/null || echo "sem pasta gradle/wrapper"
+/** Widget da tela inicial: um toque abre a janelinha de registro (não abre o app inteiro). */
+class GlucoseWidgetProvider : AppWidgetProvider() {
+    override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
+        for (id in appWidgetIds) {
+            val views = RemoteViews(context.packageName, R.layout.widget_glucose)
+            val i = Intent(context, QuickGlucoseActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pi = PendingIntent.getActivity(context, 7703, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            views.setOnClickPendingIntent(R.id.widget_root, pi)
+            appWidgetManager.updateAppWidget(id, views)
+        }
+    }
 
-          GV=8.11.1
-          if [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-            DETECTED=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" | head -1)
-            if [ -n "$DETECTED" ]; then
-              GV="$DETECTED"
-            fi
-          fi
-          echo "gv=$GV" >> "$GITHUB_OUTPUT"
-          echo "Gradle: $GV"
+    companion object {
+        fun isPlaced(ctx: Context): Boolean = try {
+            AppWidgetManager.getInstance(ctx).getAppWidgetIds(ComponentName(ctx, GlucoseWidgetProvider::class.java)).isNotEmpty()
+        } catch (_: Exception) { false }
+    }
+}
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
+/** Janelinha de registro rápido (fundo transparente, fecha sozinha ao salvar). */
+class QuickGlucoseActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            AgonAppTheme(darkTheme = isSystemInDarkTheme()) {
+                QuickGlucoseDialog(onClose = { finish() })
+            }
+        }
+    }
+}
 
-      - name: Prepare Android SDK
-        run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: ${{ steps.p.outputs.gv }}
-
-      - name: Build universal APK
-        working-directory: ${{ steps.p.outputs.dir }}
-        run: |
-          # NAO usa ./gradlew (muitos .aaf nao tem gradle-wrapper.jar)
-          # Usa o Gradle instalado pelo setup-gradle
-          set +e
-          gradle assembleDebug --no-daemon --stacktrace --console=plain 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-          STATUS=${PIPESTATUS[0]}
-          set -e
-          if [ "$STATUS" -ne 0 ]; then
-            # Erros do Kotlin com o caminho encurtado e quebra de linha (legivel no celular)
-            sed -E 's#file:///[^ ]*/proj/app/src/main/java/com/agon/app/##' "$GITHUB_WORKSPACE/build.log" > "$GITHUB_WORKSPACE/build.short.log"
-            {
-              echo "## Erro do build (resumo)"
-              echo '```'
-              grep -E "^e: " "$GITHUB_WORKSPACE/build.short.log" | sed 's/^e: //' | fold -s -w 60 | head -150
-              echo '--- outros ---'
-              grep -E "What went wrong|Execution failed|Duplicate class|requires libraries|Could not resolve|Could not find|AAPT:|Manifest merger" "$GITHUB_WORKSPACE/build.short.log" | grep -v "at org.gradle" | fold -s -w 60 | head -30
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            MSG=$(grep -E "^e: " "$GITHUB_WORKSPACE/build.short.log" | sed 's/^e: //' | head -14 | tr '\n' '|' | sed 's/%/%25/g')
-            echo "::error title=Erros do Kotlin::${MSG}"
-            exit "$STATUS"
-          fi
-
-      - name: Prepare APK
-        run: |
-          APK=$(find proj -path '*/build/outputs/apk/debug/*.apk' | head -1)
-          if [ -z "$APK" ]; then
-            echo "APK nao encontrado"
-            find proj -path '*/build/outputs/*' | head -50
-            exit 1
-          fi
-          echo "APK: $APK"
-          cp "$APK" GlucoCris-universal.apk
-          ls -lh GlucoCris-universal.apk
-
-      - name: Publish APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: apk-build-${{ github.run_number }}
-          name: GlucoCris build ${{ github.run_number }}
-          body: |
-            APK gerado a partir do .aaf com maior versionCode.
-            Baixe GlucoCris-universal.apk e instale no celular.
-          files: GlucoCris-universal.apk
+@Composable
+private fun QuickGlucoseDialog(onClose: () -> Unit) {
+    val g = glucoColors()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var text by remember { mutableStateOf("") }
+    var unit by remember { mutableStateOf("mg/dL") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        unit = QuickGlucose.unitNow(context)
+        try { focus.requestFocus() } catch (_: Exception) {}
+    }
+    Dialog(onDismissRequest = onClose) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(g.card).padding(20.dp),
+        ) {
+            Text("Registrar glicemia", color = g.ink, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+            Text("Valor em $unit", color = g.muted, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 12.dp))
+            BasicTextField(
+                value = text,
+                onValueChange = { if (it.length <= 6) { text = it; error = null } },
+                singleLine = true,
+                textStyle = TextStyle(color = g.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(g.inputBg)
+                    .padding(horizontal = 14.dp, vertical = 14.dp)
+                    .focusRequester(focus),
+                decorationBox = { inner ->
+                    Box {
+                        if (text.isEmpty()) Text(if (unit == "mmol/L") "ex.: 5,6" else "ex.: 112", color = g.muted, fontSize = 18.sp)
+                        inner()
+                    }
+                },
+            )
+            error?.let { Text(it, color = g.red, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
+            Row(Modifier.fillMaxWidth().padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PrimaryButton("Cancelar", g.muted, { onClose() }, Modifier.weight(1f))
+                PrimaryButton(if (busy) "Salvando…" else "Salvar", g.violet, {
+                    if (busy) return@PrimaryButton
+                    busy = true
+                    scope.launch {
+                        val (ok, msg) = QuickGlucose.save(context, text)
+                        busy = false
+                        if (ok) {
+                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                            onClose()
+                        } else error = msg
+                    }
+                }, Modifier.weight(1f))
+            }
+        }
+    }
+}

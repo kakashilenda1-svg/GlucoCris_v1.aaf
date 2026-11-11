@@ -95,20 +95,19 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 4. Configurar Android SDK (forma confiável)
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
+      # 4. Android SDK: o runner ubuntu-24.04 ja traz o SDK instalado (ANDROID_HOME).
+      #    NAO usar android-actions/setup-android: falha com o sdkmanager 16 ("Failed to find package 'tools'").
       - name: Preparar Android SDK
         shell: bash
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          which sdkmanager || true
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "platform-tools"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          fi
+          echo "sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
 
       # 5. Instalar Gradle
       - name: Configurar Gradle
@@ -172,42 +171,36 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 8. Preparar APK
+      # 8. Preparar APK universal
       - name: Preparar APK
         if: success()
         shell: bash
         run: |
-          VERSION=$(sed -n \
-            's/.*versionName = "\([^"]*\)".*/\1/p' \
-            "$PROJECT_DIR/app/build.gradle.kts" | head -n 1)
-
-          VERSION=${VERSION:-1.27.0}
-
-          APK_PATH="$PROJECT_DIR/app/build/outputs/apk/debug"
-          APK=$(find "$APK_PATH" -type f -name "*.apk" -print -quit)
-
+          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' "$PROJECT_DIR/app/build.gradle.kts" | head -n 1)
+          VERSION=${VERSION:-1.0.0}
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -type f -name "*.apk" -print -quit)
           if [ -z "$APK" ]; then
             echo "::error::Nenhum APK foi gerado."
-            find "$PROJECT_DIR/app/build" -name "*.apk" 2>/dev/null || true
             exit 1
           fi
-
           mkdir -p dist
-          cp "$APK" "dist/GlucoCris-v${VERSION}.apk"
+          cp "$APK" "dist/GlucoCris-universal-v${VERSION}-build${GITHUB_RUN_NUMBER}.apk"
+          cp "$APK" "dist/GlucoCris-universal-latest.apk"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "APK pronto: GlucoCris-v${VERSION}.apk ($(du -h dist/GlucoCris-v${VERSION}.apk))"
+          ls -lh dist
 
       # 9. Disponibilizar APK para download
       - name: Publicar Artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: GlucoCris-v${{ env.VERSION }}-apk
-          path: dist/*.apk
+          name: GlucoCris-universal-v${{ env.VERSION }}-build${{ github.run_number }}
+          path: dist/GlucoCris-universal-v*.apk
           if-no-files-found: error
           retention-days: 30
 
-      # 10. Publicar na aba Releases
+      # 10. Releases: (a) um release por build (historico de todas as atualizacoes)
+      #                (b) "apk-mais-recente" sempre com o link fixo da versao mais nova
       - name: Publicar APK em Releases
         if: success()
         continue-on-error: true
@@ -216,14 +209,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          TAG="apk-mais-recente"
-          APK="dist/GlucoCris-v${VERSION}.apk"
+          VERSIONED="dist/GlucoCris-universal-v${VERSION}-build${GITHUB_RUN_NUMBER}.apk"
+          LATEST="dist/GlucoCris-universal-latest.apk"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
+          gh release create "v${VERSION}-build${GITHUB_RUN_NUMBER}" "$VERSIONED" \
+            --title "Gluco Cris v${VERSION} (build ${GITHUB_RUN_NUMBER})" \
+            --notes "APK universal (arm64-v8a + x86_64). Instala por cima da versao anterior." \
+            --target "$GITHUB_SHA"
+
+          if gh release view apk-mais-recente >/dev/null 2>&1; then
+            gh release delete-asset apk-mais-recente "GlucoCris-universal-latest.apk" -y 2>/dev/null || true
+            gh release upload apk-mais-recente "$LATEST" --clobber
+            gh release edit apk-mais-recente --title "Gluco Cris - mais recente (v${VERSION} build ${GITHUB_RUN_NUMBER})"
           else
-            gh release create "$TAG" "$APK" \
-              --title "Gluco Cris v${VERSION}" \
-              --notes "APK gerado automaticamente pelo GitHub Actions." \
+            gh release create apk-mais-recente "$LATEST" \
+              --title "Gluco Cris - mais recente (v${VERSION} build ${GITHUB_RUN_NUMBER})" \
+              --notes "Sempre a versao mais nova. Baixe GlucoCris-universal-latest.apk." \
               --target "$GITHUB_SHA"
           fi

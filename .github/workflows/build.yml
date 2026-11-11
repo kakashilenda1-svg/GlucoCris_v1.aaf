@@ -1,4 +1,3 @@
-
 name: Build APK GlucoCris
 
 on:
@@ -85,6 +84,10 @@ jobs:
             exit 1
           fi
 
+          # Mostra a versão do BOM para diagnóstico
+          echo "=== Compose BOM usado ==="
+          grep -n "compose-bom" "$PROJECT_DIR/app/build.gradle.kts" || true
+
       # 3. Configurar Java
       - name: Configurar Java 17
         uses: actions/setup-java@v4
@@ -92,17 +95,20 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 4. Configurar Android SDK
+      # 4. Configurar Android SDK (forma confiável)
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Preparar Android SDK
         shell: bash
         run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          "$SDKMANAGER" \
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          which sdkmanager || true
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
             "platforms;android-36" \
-            "build-tools;36.0.0"
+            "build-tools;36.0.0" \
+            "platform-tools"
 
       # 5. Instalar Gradle
       - name: Configurar Gradle
@@ -121,63 +127,79 @@ jobs:
         run: |
           set -o pipefail
 
+          echo "=== Gradle version ==="
+          gradle --version
+
+          echo "=== Conteúdo de $PROJECT_DIR ==="
+          ls -la "$PROJECT_DIR"
+          ls -la "$PROJECT_DIR/gradle/wrapper/" 2>/dev/null || true
+
+          echo "=== Iniciando assembleDebug ==="
           gradle -p "$PROJECT_DIR" \
             :app:assembleDebug \
             --stacktrace \
             --console=plain \
-            "-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" \
+            --no-daemon \
+            "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" \
             2>&1 | tee build.log
 
-      # 7. Resumo de erros
+      # 7. Resumo de erros (aparece no topo da execução como anotação vermelha)
       - name: Resumo do erro
         if: failure() && steps.build.outcome == 'failure'
         shell: bash
         run: |
+          echo "========== ERROS REAIS DO BUILD =========="
+          grep -E '^e: |^w: .*(error)|What went wrong|Execution failed|Caused by:|Could not |Duplicate class|Manifest merger|AAPT|error:' build.log \
+            | grep -v '^\s*at ' | sort -u | head -n 40 | tee errors.txt
+          echo "=========================================="
+          while IFS= read -r line; do
+            echo "::error::${line:0:400}"
+          done < <(head -n 10 errors.txt)
           {
             echo "## Erro na compilação"
             echo '```'
-
-            if [ -f build.log ]; then
-              grep -E '^e: |^\* What went wrong:|^Execution failed' \
-                build.log | head -n 40 || true
-
-              echo "--- Detalhes adicionais ---"
-              grep -A12 '^\* What went wrong:' \
-                build.log | head -n 20 || true
-            fi
-
+            cat errors.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 7b. Guarda o log completo (baixe em "Artifacts" para copiar o erro real)
+      - name: Enviar log de build
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
       # 8. Preparar APK
       - name: Preparar APK
+        if: success()
         shell: bash
         run: |
           VERSION=$(sed -n \
             's/.*versionName = "\([^"]*\)".*/\1/p' \
             "$PROJECT_DIR/app/build.gradle.kts" | head -n 1)
 
-          VERSION=${VERSION:-dev}
+          VERSION=${VERSION:-1.27.0}
 
           APK_PATH="$PROJECT_DIR/app/build/outputs/apk/debug"
-
           APK=$(find "$APK_PATH" -type f -name "*.apk" -print -quit)
 
           if [ -z "$APK" ]; then
             echo "::error::Nenhum APK foi gerado."
+            find "$PROJECT_DIR/app/build" -name "*.apk" 2>/dev/null || true
             exit 1
           fi
 
           mkdir -p dist
-
           cp "$APK" "dist/GlucoCris-v${VERSION}.apk"
-
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-
-          echo "APK pronto: GlucoCris-v${VERSION}.apk"
+          echo "APK pronto: GlucoCris-v${VERSION}.apk ($(du -h dist/GlucoCris-v${VERSION}.apk))"
 
       # 9. Disponibilizar APK para download
       - name: Publicar Artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: GlucoCris-v${{ env.VERSION }}-apk
@@ -187,6 +209,7 @@ jobs:
 
       # 10. Publicar na aba Releases
       - name: Publicar APK em Releases
+        if: success()
         continue-on-error: true
         shell: bash
         env:

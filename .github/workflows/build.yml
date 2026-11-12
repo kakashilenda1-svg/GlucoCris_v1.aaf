@@ -1,3 +1,4 @@
+
 name: Build APK GlucoCris
 
 on:
@@ -13,10 +14,12 @@ permissions:
   contents: write
 
 env:
-  # Nome FIXO do zip com o projeto. So e usado se a raiz do repositorio NAO tiver settings.gradle(.kts).
-  # (O repositorio tem dezenas de zips antigos; procurar "qualquer zip" compilava versao errada.)
-  PROJECT_ZIP: GlucoCris_BUILD.zip
+  # ZIP OFICIAL E EXCLUSIVO DA COMPILACAO
+  PROJECT_ZIP: GlucoCris_V6_3_completo.aaf.zip
+
+  # VALIDACOES OBRIGATORIAS
   EXPECTED_APPLICATION_ID: com.agon.app
+  EXPECTED_VERSION_NAME: 1.28.3-v6.3
 
 jobs:
   build:
@@ -24,44 +27,131 @@ jobs:
     timeout-minutes: 60
 
     steps:
+
+      # ==================================================
+      # 1. BAIXAR O REPOSITORIO
+      # ==================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Descobrir a raiz REAL do projeto (sem adivinhar qual zip usar)
-      - name: Localizar projeto GlucoCris
+      # ==================================================
+      # 2. EXTRAIR SEMPRE O ZIP OFICIAL
+      # NAO UTILIZAR PROJETOS ANTIGOS DA RAIZ
+      # ==================================================
+
+      - name: Localizar e validar projeto oficial V6.3
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
-            PROJECT_DIR="."
-            echo "Projeto na raiz do repositorio."
-          else
-            if [ ! -f "$PROJECT_ZIP" ]; then
-              echo "::error::Nao ha settings.gradle(.kts) na raiz e o arquivo '$PROJECT_ZIP' nao existe no repositorio. Envie o zip com esse nome exato (ou extraia o projeto na raiz)."
-              ls -la
-              exit 1
-            fi
-            echo "Extraindo: $PROJECT_ZIP ($(du -h "$PROJECT_ZIP" | cut -f1), md5 $(md5sum "$PROJECT_ZIP" | cut -d' ' -f1))"
-            rm -rf .build-source && mkdir .build-source
-            unzip -oq "$PROJECT_ZIP" -d .build-source
-            SETTINGS=$(find .build-source -maxdepth 3 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n 1)
-            if [ -z "$SETTINGS" ]; then
-              echo "::error::'$PROJECT_ZIP' nao contem settings.gradle(.kts)."
-              exit 1
-            fi
-            PROJECT_DIR=$(dirname "$SETTINGS")
-          fi
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "=== Projeto: $PROJECT_DIR ==="
-          ls -la "$PROJECT_DIR"
-          test -f "$PROJECT_DIR/app/build.gradle.kts" || { echo "::error::app/build.gradle.kts ausente"; exit 1; }
-          echo "=== Versoes que serao compiladas (prova de qual codigo esta sendo usado) ==="
-          grep -nE "compose-bom|versionCode|versionName|compileSdk|applicationId|abiFilters" "$PROJECT_DIR/app/build.gradle.kts"
-          grep -nE "kotlin\"\) version|com.android.application" "$PROJECT_DIR/build.gradle.kts"
-          if grep -qE "compose-bom:2026\.(08|09|1[0-9])" "$PROJECT_DIR/app/build.gradle.kts"; then
-            echo "::error::Compose BOM >= 2026.08 (Compose 1.12) exige compileSdk 37 e AGP 9. Use compose-bom:2026.04.01 com AGP 8.x/compileSdk 36."
+
+          echo "======================================"
+          echo " GLOCOCRIS - VALIDACAO DA FONTE"
+          echo "======================================"
+
+          if [ ! -f "$PROJECT_ZIP" ]; then
+            echo "::error::ZIP oficial nao encontrado: $PROJECT_ZIP"
+            echo "Arquivos existentes na raiz:"
+            ls -lah
             exit 1
           fi
+
+          echo "ZIP selecionado: $PROJECT_ZIP"
+          echo "Tamanho:"
+          du -h "$PROJECT_ZIP"
+
+          echo "SHA256 DO ZIP:"
+          sha256sum "$PROJECT_ZIP"
+
+          # Remove qualquer extracao anterior
+          rm -rf .build-source
+
+          mkdir -p .build-source
+
+          # Extracao obrigatoria do arquivo oficial
+          unzip -oq "$PROJECT_ZIP" -d .build-source
+
+          # Localizar settings.gradle
+          mapfile -t SETTINGS_FILES < <(
+            find .build-source \
+              -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \) \
+              -not -path '*/.gradle/*' \
+              | sort
+          )
+
+          if [ "${#SETTINGS_FILES[@]}" -ne 1 ]; then
+            echo "::error::Esperado exatamente um projeto Gradle no ZIP. Encontrados: ${#SETTINGS_FILES[@]}"
+            printf '%s\n' "${SETTINGS_FILES[@]}"
+            exit 1
+          fi
+
+          SETTINGS="${SETTINGS_FILES[0]}"
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Projeto oficial extraido:"
+          echo "$PROJECT_DIR"
+
+          # Verificar arquivos obrigatorios
+          test -f "$PROJECT_DIR/app/build.gradle.kts" || {
+            echo "::error::app/build.gradle.kts ausente"
+            exit 1
+          }
+
+          test -f "$PROJECT_DIR/gradlew" || {
+            echo "::error::Gradle Wrapper ausente"
+            exit 1
+          }
+
+          # Verificar versao diretamente no codigo-fonte
+          if ! grep -Fq \
+            "versionName = \"$EXPECTED_VERSION_NAME\"" \
+            "$PROJECT_DIR/app/build.gradle.kts"; then
+
+            echo "::error::A versao do codigo-fonte nao corresponde a V6.3."
+            grep -nE "versionCode|versionName|applicationId" \
+              "$PROJECT_DIR/app/build.gradle.kts" || true
+            exit 1
+          fi
+
+          if ! grep -Fq \
+            "applicationId = \"$EXPECTED_APPLICATION_ID\"" \
+            "$PROJECT_DIR/app/build.gradle.kts"; then
+
+            echo "::error::Application ID inesperado."
+            exit 1
+          fi
+
+          echo "======================================"
+          echo "VERSAO DO CODIGO VALIDADA"
+          echo "======================================"
+
+          grep -nE \
+            "compose-bom|versionCode|versionName|compileSdk|applicationId|abiFilters" \
+            "$PROJECT_DIR/app/build.gradle.kts"
+
+          if [ -f "$PROJECT_DIR/build.gradle.kts" ]; then
+            grep -nE \
+              'kotlin".*version|com.android.application' \
+              "$PROJECT_DIR/build.gradle.kts" || true
+          fi
+
+          # Protecao de compatibilidade Compose
+          if grep -qE \
+            'compose-bom:2026\.(08|09|1[0-9])' \
+            "$PROJECT_DIR/app/build.gradle.kts"; then
+
+            echo "::error::Compose BOM incompatível com a configuracao Android deste workflow."
+            exit 1
+          fi
+
+          echo "FONTE OFICIAL V6.3 APROVADA."
+
+      # ==================================================
+      # 3. JAVA 17
+      # ==================================================
 
       - name: Configurar Java 17
         uses: actions/setup-java@v4
@@ -69,56 +159,121 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 2. SDK: o runner ubuntu-24.04 ja traz o Android SDK (ANDROID_HOME).
-      #    NAO usar android-actions/setup-android (quebra com sdkmanager 16: "Failed to find package 'tools'").
+      # ==================================================
+      # 4. ANDROID SDK
+      # ==================================================
+
       - name: Preparar Android SDK
         shell: bash
         run: |
           set -euo pipefail
+
           echo "ANDROID_HOME=$ANDROID_HOME"
+
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
           if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER=$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+            SDKMANAGER=$(command -v sdkmanager || \
+              find "$ANDROID_HOME/cmdline-tools" \
+              -name sdkmanager -type f | head -n 1)
           fi
-          echo "sdkmanager: $SDKMANAGER"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::SDKMANAGER nao encontrado."
+            exit 1
+          fi
+
           yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+          "$SDKMANAGER" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
           test -x "$ANDROID_HOME/build-tools/36.0.0/aapt2"
           test -f "$ANDROID_HOME/platforms/android-36/android.jar"
 
-      # 3. Gradle (mesma versao do wrapper do projeto)
+          echo "Android SDK validado."
+
+      # ==================================================
+      # 5. GRADLE
+      # ==================================================
+
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
           cache-disabled: true
 
-      # 4. Compilar (falha de verdade se o Gradle falhar; sem continue-on-error)
-      - name: Compilar GlucoCris
+      # ==================================================
+      # 6. COMPILACAO LIMPA
+      # ==================================================
+
+      - name: Compilar GlucoCris V6.3
         id: build
         shell: bash
         env:
           TAVILY_PROXY_URL: ${{ secrets.TAVILY_PROXY_URL }}
           TAVILY_APP_TOKEN: ${{ secrets.TAVILY_APP_TOKEN }}
         run: |
-          set -o pipefail
-          gradle --version
-          gradle -p "$PROJECT_DIR" :app:assembleDebug \
-            --stacktrace --console=plain --no-daemon \
-            "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" \
-            2>&1 | tee build.log
+          set -euo pipefail
 
-      # 5. Mostrar o erro REAL (anotacoes vermelhas no topo da execucao)
+          cd "$PROJECT_DIR"
+
+          chmod +x gradlew
+
+          echo "======================================"
+          echo "COMPILANDO GLOCOCRIS V6.3"
+          echo "======================================"
+
+          gradle --version
+
+          # Limpar compilacoes anteriores
+          ./gradlew clean \
+            --no-daemon \
+            --console=plain
+
+          # Compilacao completa, sem build cache
+          ./gradlew :app:assembleDebug \
+            --stacktrace \
+            --console=plain \
+            --no-daemon \
+            --no-build-cache \
+            --rerun-tasks \
+            "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" \
+            2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+          echo "COMPILACAO CONCLUIDA."
+
+      # ==================================================
+      # 7. RESUMO DOS ERROS REAIS
+      # ==================================================
+
       - name: Resumo do erro
         if: failure() && steps.build.outcome == 'failure'
         shell: bash
         run: |
           echo "========== ERROS REAIS DO BUILD =========="
-          grep -E '^e: |What went wrong|Execution failed|Caused by:|Could not |Duplicate class|Manifest merger|AAPT|error:' build.log \
-            | grep -v '^\s*at ' | sort -u | head -n 40 | tee errors.txt || true
+
+          grep -E \
+            '^e: |What went wrong|Execution failed|Caused by:|Could not |Duplicate class|Manifest merger|AAPT|error:' \
+            build.log \
+            | grep -v '^\s*at ' \
+            | sort -u \
+            | head -n 40 \
+            | tee errors.txt || true
+
           echo "=========================================="
-          while IFS= read -r line; do echo "::error::${line:0:400}"; done < <(head -n 10 errors.txt)
-          { echo "## Erro na compilacao"; echo '```'; cat errors.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+          while IFS= read -r line; do
+            echo "::error::${line:0:400}"
+          done < <(head -n 10 errors.txt)
+
+          {
+            echo "## Erro na compilacao"
+            echo '```'
+            cat errors.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enviar log de build
         if: failure()
@@ -129,51 +284,140 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 6. Validar o APK de verdade (qualquer falha aqui reprova o build)
-      - name: Validar APK
+      # ==================================================
+      # 8. VALIDAR APK GERADO
+      # ==================================================
+
+      - name: Validar APK V6.3
         shell: bash
         run: |
           set -euo pipefail
+
           BT="$ANDROID_HOME/build-tools/36.0.0"
-          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -type f -name "*.apk" | head -n 1)
-          [ -n "$APK" ] || { echo "::error::Nenhum APK gerado"; exit 1; }
+
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/debug"
+
+          mapfile -t APK_FILES < <(
+            find "$APK_DIR" -type f -name "*.apk" | sort
+          )
+
+          if [ "${#APK_FILES[@]}" -ne 1 ]; then
+            echo "::error::Esperado exatamente um APK universal. Encontrados: ${#APK_FILES[@]}"
+            printf '%s\n' "${APK_FILES[@]}"
+            exit 1
+          fi
+
+          APK="${APK_FILES[0]}"
+
           SIZE=$(stat -c %s "$APK")
-          echo "APK: $APK ($SIZE bytes)"
-          [ "$SIZE" -gt 5000000 ] || { echo "::error::APK suspeito (menor que 5 MB)"; exit 1; }
+
+          echo "APK: $APK"
+          echo "Tamanho: $SIZE bytes"
+
+          [ "$SIZE" -gt 5000000 ] || {
+            echo "::error::APK suspeito: menor que 5 MB."
+            exit 1
+          }
+
           unzip -tq "$APK"
-          "$BT/apksigner" verify --verbose "$APK" | head -n 8
+
+          "$BT/apksigner" verify --verbose "$APK" \
+            > apksigner-validation.txt
+
+          cat apksigner-validation.txt
+
           "$BT/aapt2" dump badging "$APK" > badging.txt
-          PKG=$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" badging.txt)
-          VCODE=$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" badging.txt | head -n 1)
-          VNAME=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" badging.txt | head -n 1)
-          ABIS=$(sed -n "s/^native-code: //p" badging.txt)
-          echo "applicationId=$PKG versionCode=$VCODE versionName=$VNAME abis=$ABIS"
-          [ "$PKG" = "$EXPECTED_APPLICATION_ID" ] || { echo "::error::applicationId inesperado: $PKG"; exit 1; }
-          [ -n "$VNAME" ] || { echo "::error::versionName vazio"; exit 1; }
-          mkdir -p dist
-          cp "$APK" "dist/GlucoCris-universal-v${VNAME}-build${GITHUB_RUN_NUMBER}.apk"
-          cp "$APK" "dist/GlucoCris-universal-latest.apk"
+
+          PKG=$(sed -n \
+            "s/^package: name='\([^']*\)'.*/\1/p" \
+            badging.txt)
+
+          VCODE=$(sed -n \
+            "s/.*versionCode='\([^']*\)'.*/\1/p" \
+            badging.txt | head -n 1)
+
+          VNAME=$(sed -n \
+            "s/.*versionName='\([^']*\)'.*/\1/p" \
+            badging.txt | head -n 1)
+
+          ABIS=$(sed -n \
+            "s/^native-code: //p" \
+            badging.txt)
+
+          echo "======================================"
+          echo "VALIDACAO DO APK"
+          echo "======================================"
+
+          echo "applicationId=$PKG"
+          echo "versionCode=$VCODE"
+          echo "versionName=$VNAME"
+          echo "ABIs=$ABIS"
+
+          [ "$PKG" = "$EXPECTED_APPLICATION_ID" ] || {
+            echo "::error::Application ID incorreto."
+            exit 1
+          }
+
+          [ "$VNAME" = "$EXPECTED_VERSION_NAME" ] || {
+            echo "::error::APK nao corresponde a versao V6.3."
+            exit 1
+          }
+
+          [ -n "$VCODE" ] || {
+            echo "::error::versionCode vazio."
+            exit 1
+          }
+
+          # Preparar arquivos finais
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+
+          VERSIONED="GlucoCris-universal-v${VNAME}-build${GITHUB_RUN_NUMBER}.apk"
+
+          cp "$APK" "$GITHUB_WORKSPACE/dist/$VERSIONED"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/dist/GlucoCris-universal-latest.apk"
+
+          SHA256=$(sha256sum "$APK" | cut -d' ' -f1)
+
           echo "VERSION=$VNAME" >> "$GITHUB_ENV"
+          echo "APK_SHA256=$SHA256" >> "$GITHUB_ENV"
+
           {
-            echo "## APK gerado e validado"
-            echo "| Campo | Valor |"; echo "|---|---|"
-            echo "| Arquivo | GlucoCris-universal-v${VNAME}-build${GITHUB_RUN_NUMBER}.apk |"
-            echo "| Tamanho | $(du -h "$APK" | cut -f1) ($SIZE bytes) |"
-            echo "| applicationId | $PKG |"
-            echo "| versionName / versionCode | $VNAME / $VCODE |"
+            echo "## APK GERADO E VALIDADO"
+            echo ""
+            echo "| Campo | Valor |"
+            echo "|---|---|"
+            echo "| Arquivo | $VERSIONED |"
+            echo "| Tamanho | $SIZE bytes |"
+            echo "| Application ID | $PKG |"
+            echo "| Version Name | $VNAME |"
+            echo "| Version Code | $VCODE |"
             echo "| ABIs | $ABIS |"
-            echo "| SHA-256 | $(sha256sum "$APK" | cut -d' ' -f1) |"
+            echo "| SHA-256 | $SHA256 |"
+            echo "| Fonte | $PROJECT_ZIP |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "APK V6.3 APROVADO PARA PUBLICACAO."
+
+      # ==================================================
+      # 9. PUBLICAR ARTIFACT
+      # ==================================================
 
       - name: Publicar Artifact
         uses: actions/upload-artifact@v4
         with:
           name: GlucoCris-universal-v${{ env.VERSION }}-build${{ github.run_number }}
-          path: dist/GlucoCris-universal-v*.apk
+          path: |
+            dist/GlucoCris-universal-v*.apk
+            dist/GlucoCris-universal-latest.apk
           if-no-files-found: error
           retention-days: 30
 
-      # 7. Releases: um por build (historico) + "apk-mais-recente" (link fixo). Sem continue-on-error.
+      # ==================================================
+      # 10. PUBLICAR RELEASES
+      # ==================================================
+
       - name: Publicar APK em Releases
         shell: bash
         env:
@@ -181,25 +425,52 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
           TAG="v${VERSION}-build${GITHUB_RUN_NUMBER}"
+
           VERSIONED="dist/GlucoCris-universal-v${VERSION}-build${GITHUB_RUN_NUMBER}.apk"
+
           LATEST="dist/GlucoCris-universal-latest.apk"
 
+          echo "======================================"
+          echo "PUBLICANDO GLOCOCRIS V6.3"
+          echo "======================================"
+
+          # Release individual de cada compilacao
           if gh release view "$TAG" > /dev/null 2>&1; then
+
             gh release upload "$TAG" "$VERSIONED" --clobber
+
           else
+
             gh release create "$TAG" "$VERSIONED" \
               --title "Gluco Cris v${VERSION} (build ${GITHUB_RUN_NUMBER})" \
-              --notes "APK universal (arm64-v8a + x86_64). Instala por cima da versao anterior." \
+              --notes "APK universal gerado e validado pelo GitHub Actions. Fonte: ${PROJECT_ZIP}. SHA256: ${APK_SHA256}" \
               --target "$GITHUB_SHA"
+
           fi
 
+          # Release fixa do APK mais recente
           if gh release view apk-mais-recente > /dev/null 2>&1; then
+
             gh release upload apk-mais-recente "$LATEST" --clobber
-            gh release edit apk-mais-recente --title "Gluco Cris - mais recente (v${VERSION} build ${GITHUB_RUN_NUMBER})"
+
+            gh release edit apk-mais-recente \
+              --title "Gluco Cris - mais recente (v${VERSION} build ${GITHUB_RUN_NUMBER})" \
+              --notes "Versao validada: ${VERSION}. Build: ${GITHUB_RUN_NUMBER}. SHA256: ${APK_SHA256}. Baixe GlucoCris-universal-latest.apk."
+
           else
+
             gh release create apk-mais-recente "$LATEST" \
               --title "Gluco Cris - mais recente (v${VERSION} build ${GITHUB_RUN_NUMBER})" \
-              --notes "Sempre a versao mais nova: baixe GlucoCris-universal-latest.apk." \
+              --notes "Versao validada: ${VERSION}. Build: ${GITHUB_RUN_NUMBER}. Baixe GlucoCris-universal-latest.apk." \
               --target "$GITHUB_SHA"
+
           fi
+
+          echo "======================================"
+          echo "PUBLICACAO CONCLUIDA"
+          echo "VERSAO: $VERSION"
+          echo "BUILD: $GITHUB_RUN_NUMBER"
+          echo "SHA256: $APK_SHA256"
+          echo "======================================"

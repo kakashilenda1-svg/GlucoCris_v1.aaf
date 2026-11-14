@@ -21,111 +21,120 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # 1. Baixar o repositorio
+
+      # 1. BAIXAR REPOSITORIO ATUALIZADO
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2. Encontrar e extrair o projeto Android
+      # 2. IDENTIFICAR O ULTIMO PROJETO ENVIADO
       - name: Extract project
         id: p
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
-            echo "Projeto encontrado na raiz."
-            DIR="."
-          else
-            ARQUIVO=""
-            BEST=""
+          ARQUIVO=""
 
-            shopt -s nullglob
+          mapfile -d '' FILES < <(
+            git ls-files -z -- '*.aaf' '*.zip'
+          )
 
-            for f in *.aaf *.zip; do
-              [ -f "$f" ] || continue
+          if [ "${#FILES[@]}" -gt 0 ]; then
 
-              if ! unzip -l "$f" 2>/dev/null | grep -qE 'settings\.gradle(\.kts)?$'; then
-                echo "Ignorando: $f"
-                continue
-              fi
+            TMP="$RUNNER_TEMP/project-files.txt"
+            : > "$TMP"
 
-              GRADLE_PATH=$(unzip -Z1 "$f" 2>/dev/null | grep -E '(^|/)app/build\.gradle(\.kts)?$' | head -1 || true)
+            for f in "${FILES[@]}"; do
+              TS=$(git log -1 --format=%ct -- "$f")
+              [ -n "$TS" ] || TS=0
 
-              VN="0"
-
-              if [ -n "$GRADLE_PATH" ]; then
-                VN=$(unzip -p "$f" "$GRADLE_PATH" 2>/dev/null |
-                  grep -oE 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' |
-                  head -1 |
-                  sed -E 's/.*"([^"]+)"/\1/' || true)
-              fi
-
-              [ -n "$VN" ] || VN="0"
-
-              echo "Arquivo: $f | Versao: $VN"
-
-              if [ -z "$ARQUIVO" ] || [ "$(printf '%s\n%s\n' "$BEST" "$VN" | sort -V | tail -1)" = "$VN" ]; then
-                BEST="$VN"
-                ARQUIVO="$f"
-              fi
+              printf '%s\t%s\n' "$TS" "$f" >> "$TMP"
             done
 
-            if [ -z "$ARQUIVO" ]; then
-              echo "::error::Nenhum projeto Android encontrado."
-              ls -la
-              exit 1
-            fi
+            ARQUIVO=$(sort -t $'\t' -k1,1nr -k2,2r "$TMP" |
+              head -1 | cut -f2-)
 
-            echo "Projeto selecionado: $ARQUIVO"
-            echo "Versao selecionada: $BEST"
+            echo "ULTIMO PROJETO ENVIADO: $ARQUIVO"
 
             rm -rf proj
             mkdir -p proj
+
             unzip -q "$ARQUIVO" -d proj
 
-            SETTINGS=$(find proj -maxdepth 4 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -1)
+            SETTINGS=$(find proj -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \) |
+              sort | head -1)
 
             if [ -z "$SETTINGS" ]; then
-              echo "::error::settings.gradle nao encontrado."
+              echo "::error::O arquivo mais recente nao contem settings.gradle."
               exit 1
             fi
 
             DIR=$(dirname "$SETTINGS")
+
+          elif [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+
+            DIR="."
+            ARQUIVO="Projeto na raiz do repositorio"
+
+          else
+            echo "::error::Nenhum projeto Android encontrado."
+            exit 1
           fi
 
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "source=$ARQUIVO" >> "$GITHUB_OUTPUT"
 
           rm -f "$DIR/local.properties"
 
-          test -f "$DIR/app/build.gradle.kts" || test -f "$DIR/app/build.gradle" || {
-            echo "::error::Arquivo app/build.gradle ausente."
+          test -f "$DIR/app/build.gradle.kts" || \
+          test -f "$DIR/app/build.gradle" || {
+            echo "::error::app/build.gradle ausente."
             exit 1
           }
 
-          echo "--- Configuracao do projeto ---"
-          grep -hE "versionName|versionCode|compileSdk|applicationId" "$DIR"/app/build.gradle* || true
+          echo "================================"
+          echo "PROJETO SELECIONADO"
+          echo "$ARQUIVO"
+          echo "DIRETORIO: $DIR"
+          echo "================================"
+
+          grep -hE \
+            "versionName|versionCode|applicationId|compileSdk" \
+            "$DIR"/app/build.gradle* || true
 
           cat "$DIR/BUILD_STAMP.txt" 2>/dev/null || true
 
           GV=8.11.1
 
           if [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-            DETECTED=$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' "$DIR/gradle/wrapper/gradle-wrapper.properties" | head -1)
+            DETECTED=$(sed -n \
+              's/.*gradle-\(.*\)-bin\.zip/\1/p' \
+              "$DIR/gradle/wrapper/gradle-wrapper.properties" |
+              head -1)
+
             [ -n "$DETECTED" ] && GV="$DETECTED"
           fi
 
           echo "gv=$GV" >> "$GITHUB_OUTPUT"
 
-          echo "Gradle selecionado: $GV"
+          echo "Gradle: $GV"
 
-      # 3. Instalar Java
+          {
+            echo "## Projeto selecionado"
+            echo "- Arquivo: $ARQUIVO"
+            echo "- Diretorio: $DIR"
+            echo "- Gradle: $GV"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 3. INSTALAR JAVA
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # 4. Preparar Android SDK
+      # 4. PREPARAR ANDROID SDK
       - name: Prepare Android SDK
         shell: bash
         run: |
@@ -134,23 +143,27 @@ jobs:
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
           if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER=$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+            SDKMANAGER=$(command -v sdkmanager || \
+              find "$ANDROID_HOME/cmdline-tools" \
+              -name sdkmanager -type f | head -1)
           fi
 
           yes | "$SDKMANAGER" --licenses > /dev/null || true
 
-          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+          "$SDKMANAGER" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
 
           test -x "$ANDROID_HOME/build-tools/36.0.0/aapt2"
           test -f "$ANDROID_HOME/platforms/android-36/android.jar"
 
-      # 5. Configurar Gradle
+      # 5. CONFIGURAR GRADLE
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ steps.p.outputs.gv }}
           cache-disabled: true
 
-      # 6. Compilar APK
+      # 6. COMPILAR PROJETO SELECIONADO
       - name: Build universal APK
         id: build
         working-directory: ${{ steps.p.outputs.dir }}
@@ -159,13 +172,19 @@ jobs:
           TAVILY_APP_TOKEN: ${{ secrets.TAVILY_APP_TOKEN }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -o pipefail
 
-          gradle :app:assembleDebug --no-daemon --stacktrace --console=plain \
+          echo "COMPILANDO PROJETO SELECIONADO:"
+          echo "${{ steps.p.outputs.source }}"
+
+          gradle :app:clean :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --console=plain \
             "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" \
             2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-      # 7. Enviar log se houver falha
+      # 7. ENVIAR LOG SE HOUVER FALHA
       - name: Enviar log de build
         if: failure()
         uses: actions/upload-artifact@v4
@@ -175,7 +194,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 8. Validar APK
+      # 8. VALIDAR APK E IDENTIFICAR VERSAO REAL
       - name: Prepare APK
         id: apk
         shell: bash
@@ -186,7 +205,8 @@ jobs:
 
           BT="$ANDROID_HOME/build-tools/36.0.0"
 
-          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -type f -name "*.apk" | head -1)
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" \
+            -type f -name "*.apk" 2>/dev/null | head -1 || true)
 
           if [ -z "$APK" ]; then
             echo "::error::APK nao encontrado."
@@ -195,7 +215,7 @@ jobs:
 
           SIZE=$(stat -c %s "$APK")
 
-          echo "APK encontrado: $APK"
+          echo "APK: $APK"
           echo "Tamanho: $SIZE bytes"
 
           [ "$SIZE" -gt 5000000 ] || {
@@ -205,19 +225,25 @@ jobs:
 
           unzip -tq "$APK"
 
-          "$BT/apksigner" verify --verbose "$APK" | head -n 8
+          "$BT/apksigner" verify --verbose "$APK"
 
           "$BT/aapt2" dump badging "$APK" > badging.txt
 
-          PKG=$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" badging.txt)
+          PKG=$(sed -n \
+            "s/^package: name='\([^']*\)'.*/\1/p" \
+            badging.txt)
 
-          VCODE=$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" badging.txt | head -1)
+          VCODE=$(sed -n \
+            "s/.*versionCode='\([^']*\)'.*/\1/p" \
+            badging.txt | head -1)
 
-          VNAME=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" badging.txt | head -1)
+          VNAME=$(sed -n \
+            "s/.*versionName='\([^']*\)'.*/\1/p" \
+            badging.txt | head -1)
 
-          echo "applicationId=$PKG"
-          echo "versionCode=$VCODE"
-          echo "versionName=$VNAME"
+          echo "APPLICATION ID: $PKG"
+          echo "VERSION NAME: $VNAME"
+          echo "VERSION CODE: $VCODE"
 
           [ "$PKG" = "$EXPECTED_APPLICATION_ID" ] || {
             echo "::error::applicationId incorreto: $PKG"
@@ -232,18 +258,21 @@ jobs:
           cp "$APK" "$GITHUB_WORKSPACE/GlucoCris-universal.apk"
 
           echo "version=$VNAME" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$VCODE" >> "$GITHUB_OUTPUT"
 
           {
             echo "## APK gerado e validado"
             echo "| Campo | Valor |"
             echo "|---|---|"
+            echo "| Projeto | ${{ steps.p.outputs.source }} |"
+            echo "| Versao | $VNAME |"
+            echo "| Version Code | $VCODE |"
             echo "| Tamanho | $(du -h "$APK" | cut -f1) |"
-            echo "| applicationId | $PKG |"
-            echo "| versionName / versionCode | $VNAME / $VCODE |"
+            echo "| Application ID | $PKG |"
             echo "| SHA-256 | $(sha256sum "$APK" | cut -d' ' -f1) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 9. Gerar ZIP do projeto realmente utilizado na compilacao
+      # 9. GERAR ZIP DO MESMO PROJETO COMPILADO
       - name: Gerar ZIP do projeto atualizado
         shell: bash
         env:
@@ -270,37 +299,61 @@ jobs:
 
           unzip -tq "$OUT"
 
-          echo "ZIP criado e validado:"
+          echo "ZIP DO PROJETO:"
           ls -lh "$OUT"
 
-          echo "SHA-256:"
-          sha256sum "$OUT"
-
           {
-            echo "## Projeto Android completo"
-            echo "- ZIP: GlucoCris-projeto-atualizado.zip"
+            echo "## ZIP do projeto atualizado"
+            echo "- Versao: ${{ steps.apk.outputs.version }}"
+            echo "- Projeto original: ${{ steps.p.outputs.source }}"
+            echo "- Arquivo: GlucoCris-projeto-atualizado.zip"
             echo "- Tamanho: $(du -h "$OUT" | cut -f1)"
             echo "- SHA-256: $(sha256sum "$OUT" | cut -d' ' -f1)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 10. Publicar APK e ZIP na mesma Release
+      # 10. PUBLICAR APK E ZIP COMO ULTIMA RELEASE
       - name: Publicar APK e projeto ZIP
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-build-${{ github.run_number }}
           name: GlucoCris v${{ steps.apk.outputs.version }} (build ${{ github.run_number }})
-          body: |
-            GlucoCris - compilacao ${{ github.run_number }}
+          make_latest: true
+          fail_on_unmatched_files: true
 
-            Arquivos desta compilacao:
+          body: |
+            =====================================
+                       GLUCOCRIS
+            =====================================
+
+            VERSAO ATUAL: v${{ steps.apk.outputs.version }}
+
+            COMPILACAO: ${{ github.run_number }}
+
+            VERSION CODE: ${{ steps.apk.outputs.versionCode }}
+
+            PROJETO ORIGINAL:
+            ${{ steps.p.outputs.source }}
+
+            =====================================
+                  ARQUIVOS DESTA VERSAO
+            =====================================
 
             1. GlucoCris-universal.apk
+
                Aplicativo Android instalavel.
+               Versao: v${{ steps.apk.outputs.version }}
 
             2. GlucoCris-projeto-atualizado.zip
-               Projeto Android completo utilizado para gerar este APK.
 
-            Ambos os arquivos pertencem a mesma compilacao.
+               Projeto Android completo.
+               Versao: v${{ steps.apk.outputs.version }}
+
+            =====================================
+
+            APK e ZIP foram gerados a partir do
+            mesmo projeto selecionado nesta compilacao.
+
+            Esta e a publicacao mais recente.
 
           files: |
             GlucoCris-universal.apk

@@ -184,7 +184,24 @@ jobs:
             "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" \
             2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-      # 7. ENVIAR LOG SE HOUVER FALHA
+      # 7. MOSTRAR O ERRO REAL (aparece na tela de Resumo da execucao)
+      - name: Resumo do erro
+        if: failure() && steps.build.outcome == 'failure'
+        shell: bash
+        run: |
+          grep -E '^e: |What went wrong|Execution failed|Caused by:|Could not |Duplicate class|Manifest merger|AAPT|error:' build.log \
+            | grep -v '^\s*at ' | awk '!seen[$0]++' | head -n 40 > errors.txt || true
+          echo "========== ERROS REAIS DO BUILD =========="
+          cat errors.txt
+          echo "=========================================="
+          {
+            echo "## Erro na compilacao"
+            echo '```'
+            cat errors.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 8. ENVIAR LOG SE HOUVER FALHA
       - name: Enviar log de build
         if: failure()
         uses: actions/upload-artifact@v4
@@ -194,7 +211,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 8. VALIDAR APK E IDENTIFICAR VERSAO REAL
+      # 9. VALIDAR APK E IDENTIFICAR VERSAO REAL
       - name: Prepare APK
         id: apk
         shell: bash
@@ -272,7 +289,7 @@ jobs:
             echo "| SHA-256 | $(sha256sum "$APK" | cut -d' ' -f1) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 9. GERAR ZIP DO MESMO PROJETO COMPILADO
+      # 10. GERAR ZIP DO MESMO PROJETO COMPILADO
       - name: Gerar ZIP do projeto atualizado
         shell: bash
         env:
@@ -311,7 +328,7 @@ jobs:
             echo "- SHA-256: $(sha256sum "$OUT" | cut -d' ' -f1)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 10. PUBLICAR APK E ZIP COMO ULTIMA RELEASE
+      # 11. PUBLICAR APK E ZIP COMO ULTIMA RELEASE
       - name: Publicar APK e projeto ZIP
         uses: softprops/action-gh-release@v2
         with:

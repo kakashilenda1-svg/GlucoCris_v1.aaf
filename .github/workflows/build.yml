@@ -163,7 +163,7 @@ jobs:
           gradle-version: ${{ steps.p.outputs.gv }}
           cache-disabled: true
 
-      # 6. COMPILAR PROJETO SELECIONADO
+      # 6. COMPILAR PROJETO SELECIONADO (ate 3 tentativas contra falha de rede)
       - name: Build universal APK
         id: build
         working-directory: ${{ steps.p.outputs.dir }}
@@ -177,12 +177,25 @@ jobs:
           echo "COMPILANDO PROJETO SELECIONADO:"
           echo "${{ steps.p.outputs.source }}"
 
-          gradle :app:clean :app:assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            --console=plain \
-            "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" \
-            2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          : > "$GITHUB_WORKSPACE/build.log"
+          ok=0
+          for i in 1 2 3; do
+            echo "=== Tentativa $i de 3 ==="
+            EXTRA=""
+            if [ "$i" -gt 1 ]; then EXTRA="--refresh-dependencies"; fi
+            if gradle :app:clean :app:assembleDebug $EXTRA \
+              --no-daemon \
+              --stacktrace \
+              --console=plain \
+              "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" \
+              2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"; then
+              ok=1
+              break
+            fi
+            echo "Tentativa $i falhou. Aguardando antes de tentar de novo..."
+            sleep $((i * 30))
+          done
+          [ "$ok" = 1 ]
 
       # 7. MOSTRAR O ERRO REAL (aparece na tela de Resumo da execucao)
       - name: Resumo do erro
